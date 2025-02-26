@@ -6,6 +6,8 @@ from youtubesearchpython import VideosSearch
 from pydub import AudioSegment
 import tempfile
 import logging
+import threading
+from queue import Queue
 
 # Configuração do logging
 logging.basicConfig(
@@ -15,27 +17,16 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Constantes do projeto
-DOWNLOADS_FOLDER = "/app/downloads"  # Caminho absoluto no servidor
-TEMP_FOLDER = "/tmp/youtube_downloads"  # Pasta temporária para downloads
+DOWNLOADS_FOLDER = "/app/downloads"
+TEMP_FOLDER = "/tmp/youtube_downloads"
 
 def setup_server():
     """Configura o ambiente do servidor"""
     try:
-        # Criar diretórios necessários
         os.makedirs(DOWNLOADS_FOLDER, exist_ok=True)
         os.makedirs(TEMP_FOLDER, exist_ok=True)
-        
-        # Configurar permissões
         os.chmod(DOWNLOADS_FOLDER, 0o775)
         os.chmod(TEMP_FOLDER, 0o775)
-        
-        # Verificar sistema operacional
-        if os.name == 'nt':  # Windows
-            logger.info("Executando no Windows")
-        else:  # Unix/Linux
-            if os.geteuid() == 0:
-                logger.warning("Executando como root! Configure um usuário específico.")
-        
         logger.info("Ambiente do servidor configurado com sucesso!")
         return True
     except Exception as e:
@@ -43,20 +34,15 @@ def setup_server():
         return False
 
 def sanitize_filename(filename):
-    """
-    Limpa o nome do arquivo removendo caracteres especiais e limitando o tamanho.
-    """
+    """Limpa o nome do arquivo removendo caracteres especiais e limitando o tamanho."""
     safe_filename = ''.join(c for c in filename if c.isalnum() or c in '-_ .')
     if len(safe_filename) > 100:
         safe_filename = safe_filename[:100]
     return safe_filename
 
-def download_audio(url):
-    """
-    Baixa o áudio de um vídeo do YouTube usando pydub.
-    """
+def download_audio(url, queue):
+    """Baixa o áudio em uma thread separada e retorna o resultado via queue."""
     try:
-        # Configurações do yt-dlp
         ydl_opts = {
             'format': 'bestaudio/best',
             'outtmpl': os.path.join(TEMP_FOLDER, '%(title)s.%(ext)s'),
@@ -69,28 +55,20 @@ def download_audio(url):
             info = ydl.extract_info(url, download=True)
             temp_file = ydl.prepare_filename(info)
             
-            # Sanitiza o título para o nome do arquivo final
             safe_title = sanitize_filename(info['title'])
             mp3_file = os.path.join(DOWNLOADS_FOLDER, f"{safe_title}.mp3")
             
-            # Converte para MP3 usando pydub
             audio = AudioSegment.from_file(temp_file)
             audio.export(mp3_file, format="mp3")
-            
-            # Remove arquivo temporário
             os.remove(temp_file)
-            return mp3_file
             
+            queue.put(('success', mp3_file))
     except Exception as e:
         logger.error(f"Erro ao baixar o áudio: {str(e)}")
-        st.error(f"Erro ao baixar o áudio: {str(e)}")
-        return None
+        queue.put(('error', str(e)))
 
 def main():
-    """
-    Função principal do aplicativo Streamlit.
-    """
-    # Configurar ambiente do servidor
+    """Função principal do aplicativo Streamlit."""
     if not setup_server():
         logger.error("Falha na configuração do servidor!")
         return
@@ -106,18 +84,35 @@ def main():
                 if video_url:
                     st.write(f"🎵 Vídeo encontrado: [Clique para assistir]({video_url})")
                     st.write("⬇ Baixando áudio...")
-                    audio_file = download_audio(video_url)
                     
-                    if audio_file and os.path.exists(audio_file):
-                        with open(audio_file, "rb") as file:
-                            st.download_button(
-                                label="🎶 Download MP3",
-                                data=file,
-                                file_name=os.path.basename(audio_file),
-                                mime="audio/mpeg"
-                            )
+                    # Criar uma queue para comunicação entre threads
+                    queue = Queue()
+                    
+                    # Iniciar download em thread separada
+                    thread = threading.Thread(
+                        target=download_audio,
+                        args=(video_url, queue),
+                        daemon=True
+                    )
+                    thread.start()
+                    
+                    # Aguardar resultado com timeout
+                    thread.join(timeout=60)
+                    
+                    if not thread.is_alive():
+                        result, data = queue.get()
+                        if result == 'success':
+                            with open(data, "rb") as file:
+                                st.download_button(
+                                    label="🎶 Download MP3",
+                                    data=file,
+                                    file_name=os.path.basename(data),
+                                    mime="audio/mpeg"
+                                )
+                        else:
+                            st.error(f"Erro ao baixar o áudio: {data}")
                     else:
-                        st.error("Erro ao baixar o áudio.")
+                        st.error("Tempo limite excedido!")
                 else:
                     st.error("Nenhum vídeo encontrado.")
             except Exception as e:
