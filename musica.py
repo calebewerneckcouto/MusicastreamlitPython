@@ -26,11 +26,14 @@ def download_audio(url):
         'outtmpl': os.path.join(DOWNLOADS_FOLDER, '%(title)s.%(ext)s')
     }
     
-    with YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        filename = ydl.prepare_filename(info).replace(".webm", ".mp3").replace(".m4a", ".mp3")
-    
-    return filename
+    try:
+        with YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            filename = os.path.join(DOWNLOADS_FOLDER, f"{info['title']}.mp3")  # Nome do arquivo MP3
+            return filename
+    except Exception as e:
+        st.error(f"Erro ao baixar o áudio: {str(e)}")
+        return None
 
 st.title("CWCDEV YouTube MP3 Downloader")
 
@@ -46,7 +49,8 @@ if st.button("Baixar Música"):
             st.write("⬇ Baixando áudio...")
             audio_file = download_audio(video_url)
             
-            if os.path.exists(audio_file):
+            if audio_file and os.path.exists(audio_file):
+                # Abre o arquivo para download
                 with open(audio_file, "rb") as file:
                     st.download_button(
                         label="🎶 Download MP3",
