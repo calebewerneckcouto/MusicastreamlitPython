@@ -3,75 +3,82 @@ from pathlib import Path
 import streamlit as st
 from yt_dlp import YoutubeDL
 from youtubesearchpython import VideosSearch
-from pydub import AudioSegment
-import tempfile
-import logging
-import threading
-from queue import Queue
-
-# Configuração do logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
 
 # Constantes do projeto
-DOWNLOADS_FOLDER = "/app/downloads"
-TEMP_FOLDER = "/tmp/youtube_downloads"
+DOWNLOADS_FOLDER = "downloads"
 
-def setup_server():
-    """Configura o ambiente do servidor"""
+def setup_ffmpeg():
+    """
+    Configura o caminho correto do FFmpeg.
+    
+    Retorna:
+        str: Caminho absoluto para o executável do FFmpeg
+    """
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    ffmpeg_locations = [
+        os.path.join(current_dir, "ffmpeg", "bin"),
+        os.path.join(current_dir, "ffmpeg", "bin", "ffmpeg.exe"),  
+        os.getenv('FFMPEG_PATH', None)
+    ]
+    
+    for location in ffmpeg_locations:
+        if location and os.path.exists(location):
+            return location
+    
+    raise FileNotFoundError("FFmpeg não encontrado!")
+
+def search_youtube(query):
+    """
+    Busca um vídeo no YouTube.
+    
+    Args:
+        query (str): Termo de busca
+        
+    Returns:
+        str: URL do vídeo encontrado ou None se não encontrar
+    """
+    search = VideosSearch(query, limit=1)
+    results = search.result()
+    return results['result'][0]['link'] if results['result'] else None
+
+def download_audio(url):
+    """
+    Baixa o áudio de um vídeo do YouTube.
+    
+    Args:
+        url (str): URL do vídeo
+        
+    Returns:
+        str: Caminho do arquivo MP3 baixado ou None em caso de erro
+    """
     try:
-        os.makedirs(DOWNLOADS_FOLDER, exist_ok=True)
-        os.makedirs(TEMP_FOLDER, exist_ok=True)
-        os.chmod(DOWNLOADS_FOLDER, 0o775)
-        os.chmod(TEMP_FOLDER, 0o775)
-        logger.info("Ambiente do servidor configurado com sucesso!")
-        return True
-    except Exception as e:
-        logger.error(f"Erro ao configurar servidor: {str(e)}")
-        return False
-
-def sanitize_filename(filename):
-    """Limpa o nome do arquivo removendo caracteres especiais e limitando o tamanho."""
-    safe_filename = ''.join(c for c in filename if c.isalnum() or c in '-_ .')
-    if len(safe_filename) > 100:
-        safe_filename = safe_filename[:100]
-    return safe_filename
-
-def download_audio(url, queue):
-    """Baixa o áudio em uma thread separada e retorna o resultado via queue."""
-    try:
+        ffmpeg_path = setup_ffmpeg()
+        
         ydl_opts = {
             'format': 'bestaudio/best',
-            'outtmpl': os.path.join(TEMP_FOLDER, '%(title)s.%(ext)s'),
-            'restrictfilenames': True,
-            'nocheckcertificate': True,
-            'prefer_free_formats': True
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            }],
+            'ffmpeg_location': ffmpeg_path,
+            'outtmpl': os.path.join(DOWNLOADS_FOLDER, '%(title)s.%(ext)s')
         }
         
         with YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
-            temp_file = ydl.prepare_filename(info)
+            filename = os.path.join(DOWNLOADS_FOLDER, f"{info['title']}.mp3")
+            return filename
             
-            safe_title = sanitize_filename(info['title'])
-            mp3_file = os.path.join(DOWNLOADS_FOLDER, f"{safe_title}.mp3")
-            
-            audio = AudioSegment.from_file(temp_file)
-            audio.export(mp3_file, format="mp3")
-            os.remove(temp_file)
-            
-            queue.put(('success', mp3_file))
     except Exception as e:
-        logger.error(f"Erro ao baixar o áudio: {str(e)}")
-        queue.put(('error', str(e)))
+        st.error(f"Erro ao baixar o áudio: {str(e)}")
+        return None
 
 def main():
-    """Função principal do aplicativo Streamlit."""
-    if not setup_server():
-        logger.error("Falha na configuração do servidor!")
-        return
+    """
+    Função principal do aplicativo Streamlit.
+    """
+    os.makedirs(DOWNLOADS_FOLDER, exist_ok=True)
     
     st.title("CWCDEV YouTube MP3 Downloader")
     music_name = st.text_input("Digite o nome da música:")
@@ -79,44 +86,29 @@ def main():
     if st.button("Baixar Música"):
         if music_name:
             st.write("🔎 Procurando no YouTube...")
+            
             try:
-                video_url = VideosSearch(query=music_name, limit=1).result()['result'][0]['link']
+                video_url = search_youtube(music_name)
+                
                 if video_url:
                     st.write(f"🎵 Vídeo encontrado: [Clique para assistir]({video_url})")
                     st.write("⬇ Baixando áudio...")
                     
-                    # Criar uma queue para comunicação entre threads
-                    queue = Queue()
+                    audio_file = download_audio(video_url)
                     
-                    # Iniciar download em thread separada
-                    thread = threading.Thread(
-                        target=download_audio,
-                        args=(video_url, queue),
-                        daemon=True
-                    )
-                    thread.start()
-                    
-                    # Aguardar resultado com timeout
-                    thread.join(timeout=60)
-                    
-                    if not thread.is_alive():
-                        result, data = queue.get()
-                        if result == 'success':
-                            with open(data, "rb") as file:
-                                st.download_button(
-                                    label="🎶 Download MP3",
-                                    data=file,
-                                    file_name=os.path.basename(data),
-                                    mime="audio/mpeg"
-                                )
-                        else:
-                            st.error(f"Erro ao baixar o áudio: {data}")
+                    if audio_file and os.path.exists(audio_file):
+                        with open(audio_file, "rb") as file:
+                            st.download_button(
+                                label="🎶 Download MP3",
+                                data=file,
+                                file_name=os.path.basename(audio_file),
+                                mime="audio/mpeg"
+                            )
                     else:
-                        st.error("Tempo limite excedido!")
+                        st.error("Erro ao baixar o áudio.")
                 else:
                     st.error("Nenhum vídeo encontrado.")
             except Exception as e:
-                logger.error(f"Erro no processamento: {str(e)}")
                 st.error(f"Ocorreu um erro: {str(e)}")
         else:
             st.warning("Por favor, insira um nome de música.")
